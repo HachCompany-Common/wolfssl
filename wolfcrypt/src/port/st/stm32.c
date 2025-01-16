@@ -61,6 +61,9 @@
 #elif defined(WOLFSSL_STM32MP13)
 #include <stm32mp13xx_hal_conf.h>
 #include <stm32mp13xx_hal_pka.h>
+#elif defined (WOLFSSL_STM32H5)
+#include <stm32h5xx_hal_conf.h>
+#include <stm32h5xx_hal_pka.h>
 #else
 #error Please add the hal_pk.h include
 #endif
