@@ -1714,7 +1714,11 @@ WOLFSSL_API word32 CheckRunTimeSettings(void);
 #else
     typedef unsigned int  THREAD_RETURN;
     typedef size_t        THREAD_TYPE;
-    #define WOLFSSL_THREAD __stdcall
+    #if defined(__GNUC__)
+        #define WOLFSSL_THREAD
+    #else
+        #define WOLFSSL_THREAD __stdcall
+    #endif
 #endif
 
 
