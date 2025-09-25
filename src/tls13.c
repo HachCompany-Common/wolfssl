@@ -3993,6 +3993,42 @@ static int SetupPskKey(WOLFSSL* ssl, PreSharedKey* psk, int clientHello)
     }
 #endif
 
+#ifdef HAVE_SUPPORTED_CURVES
+    if (!clientHello) {
+        TLSX* ext;
+        word32 modes;
+        KeyShareEntry* kse = NULL;
+
+        /* Get the PSK key exchange modes the client wants to negotiate. */
+        ext = TLSX_Find(ssl->extensions, TLSX_PSK_KEY_EXCHANGE_MODES);
+        if (ext == NULL) {
+            WOLFSSL_ERROR_VERBOSE(PSK_KEY_ERROR);
+            return PSK_KEY_ERROR;
+        }
+        modes = ext->val;
+
+        ext = TLSX_Find(ssl->extensions, TLSX_KEY_SHARE);
+        if (ext != NULL) {
+            kse = (KeyShareEntry*)ext->data;
+        }
+        /* Use (EC)DHE for forward-security if possible. */
+        if (((modes & (1 << PSK_DHE_KE)) != 0) && (!ssl->options.noPskDheKe) &&
+                                                (kse != NULL) && kse->derived) {
+            if ((kse->session != 0) && (kse->session != kse->group)) {
+                WOLFSSL_ERROR_VERBOSE(PSK_KEY_ERROR);
+                return PSK_KEY_ERROR;
+            }
+        }
+        else if (ssl->options.onlyPskDheKe) {
+            WOLFSSL_ERROR_VERBOSE(PSK_KEY_ERROR);
+            return PSK_KEY_ERROR;
+        }
+        else if (ssl->options.noPskDheKe) {
+            ssl->arrays->preMasterSz = 0;
+        }
+    }
+    else
+#endif
     if (ssl->options.noPskDheKe) {
         ssl->arrays->preMasterSz = 0;
     }
@@ -6165,7 +6201,8 @@ static int DoPreSharedKeys(WOLFSSL* ssl, const byte* input, word32 inputSz,
         if (ret != 0)
             return ret;
         if (binderLen != current->binderLen ||
-                             XMEMCMP(binder, current->binder, binderLen) != 0) {
+                             ConstantCompare(binder, current->binder,
+                                binderLen) != 0) {
             WOLFSSL_ERROR_VERBOSE(BAD_BINDER);
             return BAD_BINDER;
         }
@@ -10118,10 +10155,24 @@ static int DoTls13CertificateVerify(WOLFSSL* ssl, byte* input,
         case TLS_ASYNC_BUILD:
         {
             int validSigAlgo;
+            const Suites* suites = WOLFSSL_SUITES(ssl);
+            word16 i;
 
             /* Signature algorithm. */
             if ((args->idx - args->begin) + ENUM_LEN + ENUM_LEN > totalSz) {
                 ERROR_OUT(BUFFER_ERROR, exit_dcv);
+            }
+
+            validSigAlgo = 0;
+            for (i = 0; i < suites->hashSigAlgoSz; i += 2) {
+                 if ((suites->hashSigAlgo[i + 0] == input[args->idx + 0]) &&
+                         (suites->hashSigAlgo[i + 1] == input[args->idx + 1])) {
+                     validSigAlgo = 1;
+                     break;
+                 }
+            }
+            if (!validSigAlgo) {
+                ERROR_OUT(INVALID_PARAMETER, exit_dcv);
             }
 
 #ifdef WOLFSSL_DUAL_ALG_CERTS
@@ -10487,28 +10538,17 @@ static int DoTls13CertificateVerify(WOLFSSL* ssl, byte* input,
         #endif /* !NO_RSA */
         #ifdef HAVE_ECC
             if ((ssl->options.peerSigAlgo == ecc_dsa_sa_algo) &&
-                (ssl->peerEccDsaKeyPresent)) {
-            #if defined(WOLFSSL_SM2) && defined(WOLFSSL_SM3)
-                if (ssl->options.peerSigAlgo == sm2_sa_algo) {
-                    ret = Sm2wSm3Verify(ssl, TLS13_SM2_SIG_ID,
-                        TLS13_SM2_SIG_ID_SZ, sig, args->sigSz,
-                        args->sigData, args->sigDataSz,
-                        ssl->peerEccDsaKey, NULL);
-                }
-                else
-            #endif
-                {
-                    WOLFSSL_MSG("Doing ECC peer cert verify");
-                    ret = EccVerify(ssl, sig, args->sigSz,
-                        args->sigData, args->sigDataSz,
-                        ssl->peerEccDsaKey,
-                    #ifdef HAVE_PK_CALLBACKS
-                        &ssl->buffers.peerEccDsaKey
-                    #else
-                        NULL
-                    #endif
-                        );
-                }
+                    ssl->peerEccDsaKeyPresent) {
+                WOLFSSL_MSG("Doing ECC peer cert verify");
+                ret = EccVerify(ssl, sig, args->sigSz,
+                    args->sigData, args->sigDataSz,
+                    ssl->peerEccDsaKey,
+                #ifdef HAVE_PK_CALLBACKS
+                    &ssl->buffers.peerEccDsaKey
+                #else
+                    NULL
+                #endif
+                    );
 
                 if (ret >= 0) {
                     /* CLIENT/SERVER: data verified with public key from
@@ -10520,6 +10560,23 @@ static int DoTls13CertificateVerify(WOLFSSL* ssl, byte* input,
                 }
             }
         #endif /* HAVE_ECC */
+        #if defined(HAVE_ECC) && defined(WOLFSSL_SM2) && defined(WOLFSSL_SM3)
+            if ((ssl->options.peerSigAlgo == sm2_sa_algo) &&
+                   ssl->peerEccDsaKeyPresent) {
+                WOLFSSL_MSG("Doing SM2/SM3 peer cert verify");
+                ret = Sm2wSm3Verify(ssl, TLS13_SM2_SIG_ID, TLS13_SM2_SIG_ID_SZ,
+                    sig, args->sigSz, args->sigData, args->sigDataSz,
+                    ssl->peerEccDsaKey, NULL);
+                if (ret >= 0) {
+                    /* CLIENT/SERVER: data verified with public key from
+                     * certificate. */
+                    ssl->options.peerAuthGood = 1;
+
+                    FreeKey(ssl, DYNAMIC_TYPE_ECC, (void**)&ssl->peerEccDsaKey);
+                    ssl->peerEccDsaKeyPresent = 0;
+                }
+            }
+        #endif
         #ifdef HAVE_ED25519
             if ((ssl->options.peerSigAlgo == ed25519_sa_algo) &&
                 (ssl->peerEd25519KeyPresent)) {

@@ -423,7 +423,7 @@ enum {
 #endif
 
 /* set up thread local storage if available */
-#ifdef HAVE_THREAD_LS
+#if defined(HAVE_THREAD_LS) && !defined(NO_THREAD_LS)
     #if defined(_MSC_VER) || defined(__WATCOMC__)
         #define THREAD_LS_T __declspec(thread)
     /* Thread local storage only in FreeRTOS v8.2.1 and higher */
@@ -746,9 +746,9 @@ enum {
     #define WC_FREE_VAR(VAR_NAME, HEAP) WC_DO_NOTHING \
         /* nothing to free, its stack */
     #define WC_DECLARE_ARRAY(VAR_NAME, VAR_TYPE, VAR_ITEMS, VAR_SIZE, HEAP) \
-        VAR_TYPE VAR_NAME[VAR_ITEMS][(VAR_SIZE) / sizeof(VAR_TYPE)] /* // NOLINT(bugprone-sizeof-expression) */
+        VAR_TYPE VAR_NAME[VAR_ITEMS][(VAR_SIZE) / sizeof(VAR_TYPE)] /* NOLINT(bugprone-sizeof-expression) */
     #define WC_ARRAY_ARG(VAR_NAME, VAR_TYPE, VAR_ITEMS, VAR_SIZE) \
-        VAR_TYPE VAR_NAME[VAR_ITEMS][(VAR_SIZE) / sizeof(VAR_TYPE)] /* // NOLINT(bugprone-sizeof-expression) */
+        VAR_TYPE VAR_NAME[VAR_ITEMS][(VAR_SIZE) / sizeof(VAR_TYPE)] /* NOLINT(bugprone-sizeof-expression) */
     #define WC_ALLOC_ARRAY(VAR_NAME, VAR_TYPE, VAR_ITEMS, VAR_SIZE, HEAP) \
         WC_DO_NOTHING
     #define WC_CALLOC_ARRAY(VAR_NAME, VAR_TYPE, VAR_ITEMS, VAR_SIZE, HEAP) \
@@ -1482,6 +1482,9 @@ WOLFSSL_API word32 CheckRunTimeSettings(void);
         #define XALIGNED(x) __attribute__ ( (aligned (x)))
     #elif defined(__KEIL__)
         #define XALIGNED(x) __align(x)
+    #elif defined(__WATCOMC__) /* && (_MSC_VER or !_MSC_VER) */
+        /* No align available for Open Watcom V2, expansion comment needed: */
+        #define XALIGNED(x) /* null expansion */
     #elif defined(_MSC_VER)
         /* disable align warning, we want alignment ! */
         #pragma warning(disable: 4324)
@@ -1551,7 +1554,7 @@ WOLFSSL_API word32 CheckRunTimeSettings(void);
 #elif defined(WOLFSSL_USER_THREADING)
     /* User can define user specific threading types
         *  THREAD_RETURN
-        *  TREAD_TYPE
+        *  THREAD_TYPE
         *  WOLFSSL_THREAD
         * e.g.
         *  typedef unsigned int  THREAD_RETURN;
@@ -1579,7 +1582,7 @@ WOLFSSL_API word32 CheckRunTimeSettings(void);
         #ifndef HAVE_SELFTEST
             #define WOLFSSL_THREAD_NO_JOIN
         #endif
-    #elif defined(__NT__)
+    #elif defined(__NT__) || defined(INTIME_RTOS)
         typedef unsigned      THREAD_RETURN;
         typedef uintptr_t     THREAD_TYPE;
         typedef struct COND_TYPE {
@@ -1711,6 +1714,12 @@ WOLFSSL_API word32 CheckRunTimeSettings(void);
     typedef unsigned int   THREAD_RETURN;
     typedef TX_THREAD      THREAD_TYPE;
     #define WOLFSSL_THREAD
+#elif defined(INTIME_RTOS)
+    typedef unsigned int  THREAD_RETURN;
+    #define INTIME_THREAD_TYPE THREAD_TYPE
+    #undef THREAD_TYPE
+    typedef uintptr_t     THREAD_TYPE;
+    #define WOLFSSL_THREAD __stdcall
 #else
     typedef unsigned int  THREAD_RETURN;
     typedef size_t        THREAD_TYPE;
@@ -1805,6 +1814,12 @@ WOLFSSL_API word32 CheckRunTimeSettings(void);
         WOLFSSL_API int wolfSSL_CondWait(COND_TYPE* cond);
         WOLFSSL_API int wolfSSL_CondStart(COND_TYPE* cond);
         WOLFSSL_API int wolfSSL_CondEnd(COND_TYPE* cond);
+    #endif
+
+    #ifdef INTIME_RTOS
+       #undef  THREAD_TYPE
+       #define THREAD_TYPE INTIME_THREAD_TYPE
+       #undef  INTIME_THREAD_TYPE
     #endif
 #else
     #define WOLFSSL_RETURN_FROM_THREAD(x) return (THREAD_RETURN)(x)
@@ -1947,6 +1962,9 @@ WOLFSSL_API word32 CheckRunTimeSettings(void);
     #ifndef SAVE_NO_VECTOR_REGISTERS
         #define SAVE_NO_VECTOR_REGISTERS(fail_clause) WC_RELAX_LONG_LOOP()
     #endif
+    #ifndef SAVE_NO_VECTOR_REGISTERS2
+        #define SAVE_NO_VECTOR_REGISTERS2() 0
+    #endif
 #else
     #ifndef SAVE_NO_VECTOR_REGISTERS
         #define SAVE_NO_VECTOR_REGISTERS(fail_clause) {     \
@@ -1955,9 +1973,9 @@ WOLFSSL_API word32 CheckRunTimeSettings(void);
                 WC_RELAX_LONG_LOOP();                       \
             }
     #endif
-#endif
-#ifndef SAVE_NO_VECTOR_REGISTERS2
-    #define SAVE_NO_VECTOR_REGISTERS2() 0
+    #ifndef SAVE_NO_VECTOR_REGISTERS2
+        #define SAVE_NO_VECTOR_REGISTERS2() WC_CHECK_FOR_INTR_SIGNALS()
+    #endif
 #endif
 #ifndef RESTORE_NO_VECTOR_REGISTERS
     #define RESTORE_NO_VECTOR_REGISTERS() WC_RELAX_LONG_LOOP()
@@ -1967,8 +1985,10 @@ WOLFSSL_API word32 CheckRunTimeSettings(void);
     #define SAVE_VECTOR_REGISTERS(fail_clause) SAVE_NO_VECTOR_REGISTERS(fail_clause)
 #endif
 #ifndef SAVE_VECTOR_REGISTERS2
-    #define SAVE_VECTOR_REGISTERS2() 0
-    #define SAVE_VECTOR_REGISTERS2_DOES_NOTHING
+    #define SAVE_VECTOR_REGISTERS2() SAVE_NO_VECTOR_REGISTERS2()
+    #define SAVE_VECTOR_REGISTERS2_DOES_NOTHING /* VECTOR_REGISTERS_{PUSH,POP}
+                                                 * in aes.c depend on this.
+                                                 */
 #endif
 #ifndef CAN_SAVE_VECTOR_REGISTERS
     #define CAN_SAVE_VECTOR_REGISTERS() 1
@@ -1987,21 +2007,28 @@ WOLFSSL_API word32 CheckRunTimeSettings(void);
     #define RESTORE_VECTOR_REGISTERS() RESTORE_NO_VECTOR_REGISTERS()
 #endif
 
-#ifdef WOLFSSL_NO_ASM
-    /* We define fallback no-op definitions for these only if asm is disabled,
-     * otherwise the using code must detect that these macros are undefined and
-     * provide its own non-vector implementation paths.
-     *
-     * Currently these macros are only used in WOLFSSL_LINUXKM code paths, which
-     * are always compiled either with substantive definitions from
-     * linuxkm_wc_port.h, or with WOLFSSL_NO_ASM defined.
-     */
-    #ifndef DISABLE_VECTOR_REGISTERS
+#if (defined(USE_INTEL_SPEEDUP) || defined(USE_INTEL_SPEEDUP_FOR_AES) || \
+     defined(WOLFSSL_AESNI) || defined(WOLFSSL_ARMASM) || \
+     defined(WOLFSSL_SP_ASM)) && !defined(WOLFSSL_NO_ASM)
+    #define WC_HAVE_VECTOR_SPEEDUPS
+#endif
+
+/* DISABLE_VECTOR_REGISTERS() and REENABLE_VECTOR_REGISTERS() are currently only
+ * used by Linux kernel code.  If WC_HAVE_VECTOR_SPEEDUPS, we default
+ * DISABLE_VECTOR_REGISTERS() to -1, to assure calling code is forced to handle
+ * the failure.  But if the build disables vec regs globally, we can return 0
+ * harmlessly.  The kernel build defines real calls for these in vectorized
+ * builds, otherwise it uses these fallbacks.
+ */
+#ifndef DISABLE_VECTOR_REGISTERS
+    #ifdef WC_HAVE_VECTOR_SPEEDUPS
+        #define DISABLE_VECTOR_REGISTERS() (-1)
+    #else
         #define DISABLE_VECTOR_REGISTERS() 0
     #endif
-    #ifndef REENABLE_VECTOR_REGISTERS
-        #define REENABLE_VECTOR_REGISTERS() WC_DO_NOTHING
-    #endif
+#endif
+#ifndef REENABLE_VECTOR_REGISTERS
+    #define REENABLE_VECTOR_REGISTERS() WC_DO_NOTHING
 #endif
 
 #ifndef WC_SANITIZE_DISABLE

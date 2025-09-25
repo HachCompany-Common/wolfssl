@@ -448,12 +448,12 @@ static int _DeriveTlsKeys(byte* key_dig, word32 key_dig_len,
 }
 
 /* External facing wrapper so user can call as well, 0 on success */
-int wolfSSL_DeriveTlsKeys(byte* key_dig, word32 key_dig_len,
+int wolfSSL_DeriveTlsKeys(byte* key_data, word32 keyLen,
                          const byte* ms, word32 msLen,
                          const byte* sr, const byte* cr,
                          int tls1_2, int hash_type)
 {
-    return _DeriveTlsKeys(key_dig, key_dig_len, ms, msLen, sr, cr, tls1_2,
+    return _DeriveTlsKeys(key_data, keyLen, ms, msLen, sr, cr, tls1_2,
         hash_type, NULL, INVALID_DEVID);
 }
 
@@ -705,7 +705,7 @@ int MakeTlsMasterSecret(WOLFSSL* ssl)
 
 /* Used by EAP-TLS and EAP-TTLS to derive keying material from
  * the master_secret. */
-int wolfSSL_make_eap_keys(WOLFSSL* ssl, void* msk, unsigned int len,
+int wolfSSL_make_eap_keys(WOLFSSL* ssl, void* key, unsigned int len,
                                                               const char* label)
 {
     int   ret;
@@ -730,7 +730,7 @@ int wolfSSL_make_eap_keys(WOLFSSL* ssl, void* msk, unsigned int len,
 
 #ifdef WOLFSSL_HAVE_PRF
     PRIVATE_KEY_UNLOCK();
-    ret = wc_PRF_TLS((byte*)msk, len, ssl->arrays->masterSecret, SECRET_LEN,
+    ret = wc_PRF_TLS((byte*)key, len, ssl->arrays->masterSecret, SECRET_LEN,
               (const byte *)label, (word32)XSTRLEN(label), seed, SEED_LEN,
               IsAtLeastTLSv1_2(ssl), ssl->specs.mac_algorithm,
               ssl->heap, ssl->devId);
@@ -740,7 +740,7 @@ int wolfSSL_make_eap_keys(WOLFSSL* ssl, void* msk, unsigned int len,
     ret = PRF_MISSING;
     WOLFSSL_MSG("Pseudo-random function is not enabled");
 
-    (void)msk;
+    (void)key;
     (void)len;
     (void)label;
 #endif
@@ -7873,6 +7873,14 @@ static int TLSX_SetSignatureAlgorithmsCert(TLSX** extensions,
 /* Key Share                                                                  */
 /******************************************************************************/
 
+#ifndef MAX_KEYSHARE_NAMED_GROUPS
+    #if defined(WOLFSSL_HAVE_MLKEM) && !defined(WOLFSSL_MLKEM_NO_MAKE_KEY)
+        #define MAX_KEYSHARE_NAMED_GROUPS    24
+    #else
+        #define MAX_KEYSHARE_NAMED_GROUPS    12
+    #endif
+#endif
+
 #if defined(WOLFSSL_TLS13) && defined(HAVE_SUPPORTED_CURVES)
 /* Create a key share entry using named Diffie-Hellman parameters group.
  * Generates a key pair.
@@ -9874,6 +9882,7 @@ static int TLSX_KeyShare_Process(WOLFSSL* ssl, KeyShareEntry* keyShareEntry)
     int ret;
 
 #if defined(HAVE_SESSION_TICKET) || !defined(NO_PSK)
+    keyShareEntry->session = ssl->session->namedGroup;
     ssl->session->namedGroup = keyShareEntry->group;
 #endif
     /* reset the pre master secret size */
@@ -9902,6 +9911,9 @@ static int TLSX_KeyShare_Process(WOLFSSL* ssl, KeyShareEntry* keyShareEntry)
         WOLFSSL_BUFFER(ssl->arrays->preMasterSecret, ssl->arrays->preMasterSz);
     }
 #endif
+#if defined(HAVE_SESSION_TICKET) || !defined(NO_PSK)
+    keyShareEntry->derived = (ret == 0);
+#endif
 #ifdef WOLFSSL_ASYNC_CRYPT
     keyShareEntry->lastRet = ret;
 #endif
@@ -9919,13 +9931,15 @@ static int TLSX_KeyShare_Process(WOLFSSL* ssl, KeyShareEntry* keyShareEntry)
  * number on error.
  */
 static int TLSX_KeyShareEntry_Parse(const WOLFSSL* ssl, const byte* input,
-            word16 length, KeyShareEntry **kse, TLSX** extensions)
+            word16 length, KeyShareEntry **kse, word16* seenGroups,
+            int* seenGroupsCnt, TLSX** extensions)
 {
     int    ret;
     word16 group;
     word16 keLen;
     int    offset = 0;
     byte*  ke;
+    int    i;
 
     if (length < OPAQUE16_LEN + OPAQUE16_LEN)
         return BUFFER_ERROR;
@@ -9939,6 +9953,19 @@ static int TLSX_KeyShareEntry_Parse(const WOLFSSL* ssl, const byte* input,
         return INVALID_PARAMETER;
     if (keLen > length - offset)
         return BUFFER_ERROR;
+
+    if (seenGroups != NULL) {
+        if (*seenGroupsCnt == MAX_KEYSHARE_NAMED_GROUPS) {
+            return BAD_KEY_SHARE_DATA;
+        }
+        for (i = 0; i < *seenGroupsCnt; i++) {
+            if (seenGroups[i] == group) {
+                return BAD_KEY_SHARE_DATA;
+            }
+        }
+        seenGroups[i] = group;
+        *seenGroupsCnt = i + 1;
+    }
 
 #ifdef WOLFSSL_HAVE_MLKEM
     if ((WOLFSSL_NAMED_GROUP_IS_PQC(group) ||
@@ -10044,6 +10071,8 @@ int TLSX_KeyShare_Parse_ClientHello(const WOLFSSL* ssl,
     int    offset = 0;
     word16 len;
     TLSX*  extension;
+    word16 seenGroups[MAX_KEYSHARE_NAMED_GROUPS];
+    int    seenGroupsCnt = 0;
 
     /* Add a KeyShare extension if it doesn't exist even if peer sent no
      * entries. The presence of this extension signals that the peer can be
@@ -10067,7 +10096,8 @@ int TLSX_KeyShare_Parse_ClientHello(const WOLFSSL* ssl,
 
     while (offset < (int)length) {
         ret = TLSX_KeyShareEntry_Parse(ssl, &input[offset],
-                length - (word16)offset, NULL, extensions);
+                length - (word16)offset, NULL, seenGroups, &seenGroupsCnt,
+                extensions);
         if (ret < 0)
             return ret;
 
@@ -10119,8 +10149,8 @@ int TLSX_KeyShare_Parse(WOLFSSL* ssl, const byte* input, word16 length,
         }
 
         /* ServerHello contains one key share entry. */
-        len = TLSX_KeyShareEntry_Parse(ssl, input, length, &keyShareEntry,
-                &ssl->extensions);
+        len = TLSX_KeyShareEntry_Parse(ssl, input, length, &keyShareEntry, NULL,
+                NULL, &ssl->extensions);
         if (len != (int)length)
             return BUFFER_ERROR;
 
@@ -16099,6 +16129,9 @@ int TLSX_Parse(WOLFSSL* ssl, const byte* input, word16 length, byte msgType,
         if ((type <= 62) || (type == TLSX_RENEGOTIATION_INFO)
         #ifdef WOLFSSL_QUIC
             || (type == TLSX_KEY_QUIC_TP_PARAMS_DRAFT)
+        #endif
+        #ifdef WOLFSSL_DUAL_ALG_CERTS
+            || (type == TLSX_CKS)
         #endif
             )
         {

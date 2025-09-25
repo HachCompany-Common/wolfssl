@@ -388,7 +388,7 @@ static int InitSha256(wc_Sha256* sha256)
     }  /* extern "C" */
 #endif
 
-    static word32 intel_flags = 0;
+    static cpuid_flags_t intel_flags = WC_CPUID_INITIALIZER;
 
 #if defined(WC_C_DYNAMIC_FALLBACK) && !defined(WC_NO_INTERNAL_FUNCTION_POINTERS)
     #define WC_NO_INTERNAL_FUNCTION_POINTERS
@@ -425,8 +425,7 @@ static int InitSha256(wc_Sha256* sha256)
         }
     #endif
 
-        if (intel_flags == 0)
-            intel_flags = cpuid_get_flags();
+        cpuid_get_flags_ex(&intel_flags);
 
         if (IS_INTEL_SHA(intel_flags)) {
         #ifdef HAVE_INTEL_AVX1
@@ -601,7 +600,7 @@ static int InitSha256(wc_Sha256* sha256)
         if (transform_check)
             return;
 
-        intel_flags = cpuid_get_flags();
+        cpuid_get_flags_ex(&intel_flags);
 
         if (IS_INTEL_SHA(intel_flags)) {
         #ifdef HAVE_INTEL_AVX1
@@ -2326,7 +2325,8 @@ void wc_Sha256Free(wc_Sha256* sha256)
     ((defined(WOLFSSL_RENESAS_TSIP_TLS) || \
       defined(WOLFSSL_RENESAS_TSIP_CRYPTONLY)) && \
     !defined(NO_WOLFSSL_RENESAS_TSIP_CRYPT_HASH)) || \
-    (defined(WOLFSSL_RENESAS_SCEPROTECT) && \
+    ((defined(WOLFSSL_RENESAS_SCEPROTECT) || \
+    (defined(WOLFSSL_RENESAS_RSIP) && (WOLFSSL_RENESAS_RZFSP_VER >= 220))) && \
     !defined(NO_WOLFSSL_RENESAS_FSPSM_HASH)) || \
     defined(WOLFSSL_RENESAS_RX64_HASH) || \
     defined(WOLFSSL_HASH_KEEP)

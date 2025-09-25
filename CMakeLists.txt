@@ -281,7 +281,28 @@ add_option("WOLFSSL_DEBUG"
     "no" "yes;no")
 
 if(WOLFSSL_DEBUG)
-    set(CMAKE_C_FLAGS "-g ${CMAKE_C_FLAGS}")
+    # Optional variable inspection
+    if (0)
+        get_cmake_property(_variableNames VARIABLES)
+        list (SORT _variableNames)
+        message(STATUS "")
+        message(STATUS "ALL VARIABLES BEGIN")
+        message(STATUS "")
+        foreach (_variableName ${_variableNames})
+            message(STATUS "${_variableName}=${${_variableName}}")
+        endforeach()
+        message(STATUS "")
+        message(STATUS "ALL VARIABLES END")
+        message(STATUS "")
+    endif()
+
+    if (CMAKE_C_COMPILER_ID STREQUAL "Watcom" OR CMAKE_C_COMPILER_ID STREQUAL "OpenWatcom" OR CMAKE_GENERATOR STREQUAL "Watcom WMake")
+        # Open Watcom v2 does not support -g debugging
+        message(STATUS "Detected Watcom compiler, using CMAKE_C_FLAGS_DEBUG -d2")
+        set(CMAKE_C_FLAGS_DEBUG "-d2 ${CMAKE_C_FLAGS_DEBUG}")
+    else()
+        set(CMAKE_C_FLAGS "-g ${CMAKE_C_FLAGS}")
+    endif()
     list(APPEND WOLFSSL_DEFINITIONS
         "-DDEBUG_WOLFSSL"
         "-DDEBUG")
@@ -1604,6 +1625,14 @@ if(NOT WOLFSSL_INLINE)
     list(APPEND WOLFSSL_DEFINITIONS "-DNO_INLINE")
 endif()
 
+add_option("WOLFSSL_ARMASM_INLINE"
+    "Enable ARM assembly inline functions (default: disabled)"
+    "no" "yes;no")
+
+if (WOLFSSL_ARMASM_INLINE)
+    list(APPEND WOLFSSL_DEFINITIONS "-DWOLFSSL_ARMASM_INLINE")
+endif()
+
 # TODO:
 #       - CRL monitor
 #       - User crypto
@@ -2660,6 +2689,7 @@ if(WOLFSSL_EXAMPLES)
         tests/api/test_ossl_ec.c
         tests/api/test_ossl_ecx.c
         tests/api/test_ossl_dsa.c
+        tests/api/test_tls13.c
         tests/srp.c
         tests/suites.c
         tests/w64wrapper.c

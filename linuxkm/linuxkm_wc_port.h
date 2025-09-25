@@ -136,6 +136,7 @@
     extern void wc_linuxkm_relax_long_loop(void);
 
     enum wc_svr_flags {
+        WC_SVR_FLAG_NONE = 0,
         WC_SVR_FLAG_INHIBIT = 1,
     };
 
@@ -160,10 +161,17 @@
         #ifndef WOLFSSL_LINUXKM_USE_SAVE_VECTOR_REGISTERS
             #define WOLFSSL_LINUXKM_USE_SAVE_VECTOR_REGISTERS
         #endif
-    #else
-        #ifndef WOLFSSL_NO_ASM
-            #define WOLFSSL_NO_ASM
-        #endif
+    #endif
+
+    #if defined(HAVE_HASHDRBG) && defined(HAVE_FIPS) && FIPS_VERSION3_LT(6, 0, 0) && \
+            (defined(HAVE_INTEL_RDSEED) || defined(HAVE_AMD_RDSEED)) && \
+            !defined(WC_LINUXKM_RDSEED_IN_GLUE_LAYER)
+        #define WC_LINUXKM_RDSEED_IN_GLUE_LAYER
+    #endif
+    #ifdef WC_LINUXKM_RDSEED_IN_GLUE_LAYER
+        struct OS_Seed;
+        extern int wc_linuxkm_GenerateSeed_IntelRD(struct OS_Seed* os, unsigned char* output, unsigned int sz);
+        #define WC_GENERATE_SEED_DEFAULT wc_linuxkm_GenerateSeed_IntelRD
     #endif
 
     #ifdef BUILDING_WOLFSSL
@@ -414,6 +422,17 @@
             #define WC_AES_XTS_SUPPORT_SIMULTANEOUS_ENC_AND_DEC_KEYS
         #endif
 
+        /* setup for LINUXKM_LKCAPI_REGISTER_HASH_DRBG_DEFAULT needs to be here
+         * to assure that calls to get_random_bytes() in random.c are gated out
+         * (they would recurse, potentially infinitely).
+         */
+        #if (defined(LINUXKM_LKCAPI_REGISTER_ALL) && \
+             !defined(LINUXKM_LKCAPI_DONT_REGISTER_HASH_DRBG) && \
+             !defined(LINUXKM_LKCAPI_DONT_REGISTER_HASH_DRBG_DEFAULT)) && \
+            !defined(LINUXKM_LKCAPI_REGISTER_HASH_DRBG_DEFAULT)
+            #define LINUXKM_LKCAPI_REGISTER_HASH_DRBG_DEFAULT
+        #endif
+
         #ifndef __PIE__
             #include <linux/crypto.h>
             #include <linux/scatterlist.h>
@@ -461,7 +480,7 @@
         extern void free_wolfcrypt_linuxkm_fpu_states(void);
         WOLFSSL_API __must_check int wc_can_save_vector_registers_x86(void);
         WOLFSSL_API __must_check int wc_save_vector_registers_x86(enum wc_svr_flags flags);
-        WOLFSSL_API void wc_restore_vector_registers_x86(void);
+        WOLFSSL_API void wc_restore_vector_registers_x86(enum wc_svr_flags flags);
 
         #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 0, 0)
             #include <asm/i387.h>
@@ -478,7 +497,7 @@
         #endif
         #ifndef SAVE_VECTOR_REGISTERS
             #define SAVE_VECTOR_REGISTERS(fail_clause) {     \
-                int _svr_ret = wc_save_vector_registers_x86(0); \
+                int _svr_ret = wc_save_vector_registers_x86(WC_SVR_FLAG_NONE); \
                 if (_svr_ret != 0) {                         \
                     fail_clause                              \
                 }                                            \
@@ -489,22 +508,22 @@
                 #define SAVE_VECTOR_REGISTERS2() ({                    \
                     int _fuzzer_ret = SAVE_VECTOR_REGISTERS2_fuzzer(); \
                     (_fuzzer_ret == 0) ?                               \
-                     wc_save_vector_registers_x86(0) :                    \
+                     wc_save_vector_registers_x86(WC_SVR_FLAG_NONE) :  \
                      _fuzzer_ret;                                      \
                 })
             #else
-                #define SAVE_VECTOR_REGISTERS2() wc_save_vector_registers_x86(0)
+                #define SAVE_VECTOR_REGISTERS2() wc_save_vector_registers_x86(WC_SVR_FLAG_NONE)
             #endif
         #endif
         #ifndef RESTORE_VECTOR_REGISTERS
-            #define RESTORE_VECTOR_REGISTERS() wc_restore_vector_registers_x86()
+            #define RESTORE_VECTOR_REGISTERS() wc_restore_vector_registers_x86(WC_SVR_FLAG_NONE)
         #endif
 
         #ifndef DISABLE_VECTOR_REGISTERS
             #define DISABLE_VECTOR_REGISTERS() wc_save_vector_registers_x86(WC_SVR_FLAG_INHIBIT)
         #endif
         #ifndef REENABLE_VECTOR_REGISTERS
-            #define REENABLE_VECTOR_REGISTERS() wc_restore_vector_registers_x86()
+            #define REENABLE_VECTOR_REGISTERS() wc_restore_vector_registers_x86(WC_SVR_FLAG_INHIBIT)
         #endif
 
     #elif defined(WOLFSSL_LINUXKM_USE_SAVE_VECTOR_REGISTERS) && (defined(CONFIG_ARM) || defined(CONFIG_ARM64))
@@ -645,6 +664,32 @@
         #error "compiling -fPIE requires PIE redirect table."
     #endif
 
+    #ifdef HAVE_LINUXKM_PIE_SUPPORT
+
+    #ifndef WOLFSSL_TEXT_SEGMENT_CANONICALIZER
+        #define WOLFSSL_TEXT_SEGMENT_CANONICALIZER(text_in, text_in_len, text_out, cur_index_p) \
+            wc_linuxkm_normalize_relocations(text_in, text_in_len, text_out, cur_index_p)
+        #define WOLFSSL_TEXT_SEGMENT_CANONICALIZER_BUFSIZ 8192
+    #endif
+
+    extern const u8
+        __wc_text_start[],
+        __wc_text_end[],
+        __wc_rodata_start[],
+        __wc_rodata_end[],
+        __wc_rwdata_start[],
+        __wc_rwdata_end[],
+        __wc_bss_start[],
+        __wc_bss_end[];
+    extern const unsigned int wc_linuxkm_pie_reloc_tab[];
+    extern const size_t wc_linuxkm_pie_reloc_tab_length;
+    extern ssize_t wc_linuxkm_normalize_relocations(
+        const u8 *text_in,
+        size_t text_in_len,
+        u8 *text_out,
+        ssize_t *cur_index_p);
+    #endif /* HAVE_LINUXKM_PIE_SUPPORT */
+
     #ifdef USE_WOLFSSL_LINUXKM_PIE_REDIRECT_TABLE
 
 #ifdef CONFIG_MIPS
@@ -654,6 +699,8 @@
 #endif
 
     struct wolfssl_linuxkm_pie_redirect_table {
+        typeof(wc_linuxkm_normalize_relocations) *wc_linuxkm_normalize_relocations;
+
     #ifndef __ARCH_MEMCMP_NO_REDIRECT
         typeof(memcmp) *memcmp;
     #endif
@@ -932,6 +979,9 @@
 
     #ifdef __PIE__
 
+    #define wc_linuxkm_normalize_relocations \
+        WC_LKM_INDIRECT_SYM(wc_linuxkm_normalize_relocations)
+
     #ifndef __ARCH_MEMCMP_NO_REDIRECT
         #define memcmp WC_LKM_INDIRECT_SYM(memcmp)
     #endif
@@ -1185,12 +1235,12 @@
             #if defined(CONFIG_X86)
                 WOLFSSL_API __must_check int wc_can_save_vector_registers_x86(void);
                 WOLFSSL_API __must_check int wc_save_vector_registers_x86(enum wc_svr_flags flags);
-                WOLFSSL_API void wc_restore_vector_registers_x86(void);
+                WOLFSSL_API void wc_restore_vector_registers_x86(enum wc_svr_flags flags);
                 #ifndef DISABLE_VECTOR_REGISTERS
                     #define DISABLE_VECTOR_REGISTERS() wc_save_vector_registers_x86(WC_SVR_FLAG_INHIBIT)
                 #endif
                 #ifndef REENABLE_VECTOR_REGISTERS
-                    #define REENABLE_VECTOR_REGISTERS() wc_restore_vector_registers_x86()
+                    #define REENABLE_VECTOR_REGISTERS() wc_restore_vector_registers_x86(WC_SVR_FLAG_INHIBIT)
                 #endif
             #else /* !CONFIG_X86 */
                 #error WOLFSSL_LINUXKM_USE_SAVE_VECTOR_REGISTERS is set for an unimplemented architecture.

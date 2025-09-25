@@ -46,6 +46,10 @@ AC_ARG_VAR(EXTRA_LDFLAGS, [Extra LDFLAGS to add to end of autoconf-computed arg 
 WOLFSSL_CONFIG_ARGS=$ac_configure_args
 AC_SUBST([WOLFSSL_CONFIG_ARGS])
 
+# Store configure options and CFLAGS for debian rules generation
+CONFIGURE_OPTIONS="$ac_configure_args"
+AC_SUBST([CONFIGURE_OPTIONS])
+
 # shared library versioning
 # The three numbers in the libwolfssl.so.*.*.* file name. Unfortunately
 
@@ -1293,7 +1297,6 @@ then
     test "$enable_certext" = "" && enable_certext=yes
     test "$enable_sep" = "" && enable_sep=yes
     test "$enable_hkdf" = "" && enable_hkdf=yes
-    test "$enable_fpecc" = "" && test "$enable_ecc" != "no" && enable_fpecc=yes
     test "$enable_eccencrypt" = "" && test "$enable_ecc" != "no" && enable_eccencrypt=yes
     test "$enable_psk" = "" && enable_psk=yes
     test "$enable_cmac" = "" && enable_cmac=yes
@@ -1323,6 +1326,13 @@ then
     test "$enable_anon" = "" && enable_anon=yes
     test "$enable_ssh" = "" && test "$enable_hmac" != "no" && enable_ssh=yes
 
+    # the compiler optimizer generates a weird out-of-bounds bss reference for
+    # find_hole() in the FP_ECC implementation.
+    if test "$ENABLED_LINUXKM_PIE" != yes
+    then
+        test "$enable_fpecc" = "" && test "$enable_ecc" != "no" && enable_fpecc=yes
+    fi
+
     if test "x$FIPS_VERSION" != "xv1"
     then
         test "$enable_rsapss" = "" && enable_rsapss=yes
@@ -1344,8 +1354,6 @@ then
     then
         test "$enable_curve25519" = "" && enable_curve25519=yes
         test "$enable_curve448" = "" && enable_curve448=yes
-        test "$enable_cryptocb" = "" && enable_cryptocb=yes
-        test "$enable_pkcallbacks" = "" && enable_pkcallbacks=yes
         test "$enable_xchacha" = "" && test "$enable_chacha" != "no" && enable_xchacha=yes
         test "$enable_pkcs7" = "" && enable_pkcs7=yes
         test "$enable_nullcipher" = "" && enable_nullcipher=yes
@@ -1358,6 +1366,8 @@ then
 
         if test "$ENABLED_LINUXKM_DEFAULTS" != "yes"
         then
+            test "$enable_cryptocb" = "" && enable_cryptocb=yes
+            test "$enable_pkcallbacks" = "" && enable_pkcallbacks=yes
             test "$enable_eccsi" = "" && test "$enable_ecc" != "no" && enable_eccsi=yes
             test "$enable_sakke" = "" && test "$enable_ecc" != "no" && enable_sakke=yes
         fi
@@ -1676,6 +1686,7 @@ then
 
     if test "$ENABLED_LIBOQS" = "no"; then
         AM_CFLAGS="$AM_CFLAGS -DWOLFSSL_WC_DILITHIUM"
+        AM_CCASFLAGS="$AM_CCASFLAGS -DWOLFSSL_WC_DILITHIUM"
         test "$enable_sha3" = "" && enable_sha3=yes
         test "$enable_shake128" = "" && enable_shake128=yes
         test "$enable_shake256" = "" && enable_shake256=yes
@@ -5655,7 +5666,8 @@ AC_ARG_ENABLE([pwdbased],
 # MemUse Entropy
 # wolfEntropy Software Jitter SP800-90B certifiable entropy source
 
-if test "$ENABLED_LINUXKM_DEFAULTS" = "yes"
+if test "$ENABLED_LINUXKM_DEFAULTS" = "yes" && \
+   (test "$ENABLED_FIPS" = "no" || test "$HAVE_FIPS_VERSION" -ge 6)
 then
     ENABLED_ENTROPY_MEMUSE_DEFAULT=yes
 else
@@ -7333,7 +7345,7 @@ then
 fi
 
 # Small Stack - Cache on object
-if test "$ENABLED_LINUXKM_DEFAULTS" = "yes"
+if test "$ENABLED_LINUXKM_DEFAULTS" = "yes" && (test "$ENABLED_FIPS" = "no" || test "$HAVE_FIPS_VERSION" -ge 6)
 then
     ENABLED_SMALL_STACK_CACHE_DEFAULT=yes
 else
@@ -8177,6 +8189,14 @@ then
         ENABLED_TICKET_NONCE_MALLOC="yes"
         AM_CFLAGS="$AM_CFLAGS -DWOLFSSL_TICKET_NONCE_MALLOC"
     fi
+elif test "$ENABLED_CURL" = "tiny"
+then
+    if test "x$ENABLED_OPENSSLEXTRA" = "xno"
+    then
+        ENABLED_OPENSSLEXTRA="x509small"
+    fi
+
+    AM_CFLAGS="$AM_CFLAGS -DHAVE_CURL"
 fi
 
 if test "$ENABLED_PSK" = "no" && test "$ENABLED_LEANPSK" = "no" \
@@ -9806,6 +9826,20 @@ then
     fi
 fi
 
+# Make function 'wolfSSL_X509_EXTENSION_get_data' return different type of
+# data for each type of extension, as it used to do in the past, instead of
+# always returning the full OCTET STRING of the extension. Use only if you
+# need to keep compatibility with older versions.
+AC_ARG_ENABLE([old-extdata-fmt],
+    [AS_HELP_STRING([--enable-old-extdata-fmt],[Enable old format for extracting extension data (default: disabled)])],
+    [ ENABLED_OLD_EXTDATA_FMT=$enableval ],
+    [ ENABLED_OLD_EXTDATA_FMT=no ]
+    )
+
+if test "x$ENABLED_OLD_EXTDATA_FMT" = "xyes"; then
+  AM_CFLAGS="$AM_CFLAGS -DWOLFSSL_OLD_EXTDATA_FMT"
+fi
+
 # determine if we have key validation mechanism
 if test "x$ENABLED_ECC" != "xno" || test "x$ENABLED_RSA" = "xyes"
 then
@@ -10918,6 +10952,7 @@ AC_CONFIG_FILES([Makefile
         wolfcrypt/test/test_paths.h
         ])
 AC_CONFIG_FILES([scripts/unit.test],[chmod +x scripts/unit.test])
+AC_CONFIG_FILES([debian/rules],[chmod +x debian/rules])
 
 AX_CREATE_GENERIC_CONFIG
 AX_AM_JOBSERVER([yes])

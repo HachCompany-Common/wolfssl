@@ -319,11 +319,24 @@
         #define WOLFSSL_USER_IO
         #define WOLFSSL_NO_SOCK
         #define NO_WRITEV
+
+        /* boards less than 32 bit int get tripped up on long OID values */
+        #define WC_16BIT_CPU
+        #define WOLFSSL_OLD_OID_SUM
+    #elif defined(__SAM3X8E__)
+        #define WOLFSSL_NO_ATOMIC
+        #define WOLFSSL_NO_SOCK
+        #define WOLFSSL_USER_IO
+        #define NO_WRITEV
     #elif defined(__arm__)
         #define WOLFSSL_NO_SOCK
         #define NO_WRITEV
-    #elif defined(ESP32) || defined(ESP8266)
+    #elif defined(ESP32)
         /* assume sockets available */
+    #elif defined(ESP8266)
+        #define WOLFSSL_NO_SOCK
+        #define WOLFSSL_USER_IO
+        #define NO_WRITEV
     #else
         #define WOLFSSL_NO_SOCK
     #endif
@@ -354,6 +367,12 @@
      * defining WOLFSSL_NO_OPTIONS_H or WOLFSSL_CUSTOM_CONFIG as appropriate.
      */
     #warning "No configuration for wolfSSL detected, check header order"
+#endif
+
+/* Ensure WOLFSSL_DEBUG_CERTS is always set when DEBUG_WOLFSSL is enabled */
+#ifdef DEBUG_WOLFSSL
+    #undef  WOLFSSL_DEBUG_CERTS
+    #define WOLFSSL_DEBUG_CERTS
 #endif
 
 #include <wolfssl/wolfcrypt/visibility.h>
@@ -562,6 +581,9 @@
         /* Espressif paths can be quite long. Ensure error prints full path. */
         #define WOLFSSL_MAX_ERROR_SZ 200
     #endif
+
+    /* Debug message do not need an additional LF for ESP_LOG */
+    #define WOLFSSL_DEBUG_LINE_ENDING ""
 
     /* Parse any Kconfig / menuconfig items into wolfSSL macro equivalents.
      * Macros may or may not be defined. If defined, they may have a value of
@@ -3747,10 +3769,13 @@ extern void uITRON4_free(void *p) ;
          * NIST SP 800-90A Rev. 1, to avoid unnecessary delays in DRBG
          * generation.
          */
-        #define WC_RESEED_INTERVAL (((word64)1UL)<<48UL)
+        #if defined(HAVE_FIPS) && FIPS_VERSION_LT(6,0)
+            #define WC_RESEED_INTERVAL UINT_MAX
+        #else
+            #define WC_RESEED_INTERVAL (((word64)1UL)<<48UL)
+        #endif
     #endif
 #endif
-
 
 /* Place any other flags or defines here */
 
@@ -4038,7 +4063,8 @@ extern void uITRON4_free(void *p) ;
 #if defined(WOLFCRYPT_ONLY) && defined(NO_AES) && !defined(WOLFSSL_SHA384) && \
     !defined(WOLFSSL_SHA512) && defined(WC_NO_RNG) && \
     !defined(WOLFSSL_SP_MATH) && !defined(WOLFSSL_SP_MATH_ALL) \
-    && !defined(USE_FAST_MATH) && defined(NO_SHA256)
+    && !defined(USE_FAST_MATH) && defined(NO_SHA256) && \
+    !defined(WOLFSSL_USE_FORCE_ZERO)
     #undef  WOLFSSL_NO_FORCE_ZERO
     #define WOLFSSL_NO_FORCE_ZERO
 #endif
@@ -4389,6 +4415,31 @@ extern void uITRON4_free(void *p) ;
     #undef XREALLOC
 #endif
 
+/* There's currently no 100% reliable "smaller than 32 bit" detection.
+ * The user can specify: WC_16BIT_CPU
+ * Lower 16 bits of new OID values may collide on some 16 bit platforms.
+ *   e.g  Arduino Mega, fqbn=arduino:avr:mega  */
+#if defined(WC_16BIT_CPU)
+    /* Force the old, 16 bit OIDs to be used in wolfcrypt/oid_sum.h */
+    #undef  WOLFSSL_OLD_OID_SUM
+    #define WOLFSSL_OLD_OID_SUM
+#endif
+
+/* Support for Key to DER conversion */
+#if !defined(NO_RSA) && \
+    (defined(WOLFSSL_KEY_GEN) || defined(WOLFSSL_CERT_GEN) || \
+     defined(WOLFSSL_KCAPI_RSA) || defined(OPENSSL_EXTRA) || \
+     defined(WOLFSSL_SE050))
+    /* FIPS v2 has the wc_RsaKeyToDer in rsa.h (in boundary),
+     * so with FIPS or self test only allow with WOLFSSL_KEY_GEN */
+    #if (!defined(HAVE_FIPS) && !defined(HAVE_SELFTEST)) || \
+        defined(WOLFSSL_KEY_GEN)
+
+        #undef  WOLFSSL_KEY_TO_DER
+        #define WOLFSSL_KEY_TO_DER
+    #endif
+#endif
+
 
 /* ---------------------------------------------------------------------------
  * Deprecated Algorithm Handling
@@ -4424,6 +4475,12 @@ extern void uITRON4_free(void *p) ;
         #undef WOLFSSL_SYS_CA_CERTS
     #endif
 #endif /* WOLFSSL_SYS_CA_CERTS */
+
+#ifdef NO_WOLFSSL_DEBUG_CERTS
+    /* Simplify certificate debugging gate check with only WOLFSSL_DEBUG_CERTS.
+     * NO_WOLFSSL_DEBUG_CERTS prioritized over WOLFSSL_DEBUG_CERTS; disable: */
+    #undef WOLFSSL_DEBUG_CERTS
+#endif
 
 #if defined(SESSION_CACHE_DYNAMIC_MEM) && defined(PERSIST_SESSION_CACHE)
 #error "Dynamic session cache currently does not support persistent session cache."

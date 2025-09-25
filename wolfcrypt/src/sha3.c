@@ -67,8 +67,7 @@
         defined(WOLFSSL_ARMASM))
     #include <wolfssl/wolfcrypt/cpuid.h>
 
-    word32 cpuid_flags;
-    int cpuid_flags_set = 0;
+    static cpuid_flags_t cpuid_flags = WC_CPUID_INITIALIZER;
 #ifdef WC_C_DYNAMIC_FALLBACK
     #define SHA3_BLOCK (sha3->sha3_block)
     #define SHA3_BLOCK_N (sha3->sha3_block_n)
@@ -612,25 +611,27 @@ static int InitSha3(wc_Sha3* sha3)
 #endif
 
 #ifdef USE_INTEL_SPEEDUP
-    if (!cpuid_flags_set) {
-        cpuid_flags = cpuid_get_flags();
-        cpuid_flags_set = 1;
-#ifdef WC_C_DYNAMIC_FALLBACK
-    }
     {
+        int cpuid_flags_were_updated = cpuid_get_flags_ex(&cpuid_flags);
+#ifdef WC_C_DYNAMIC_FALLBACK
+        (void)cpuid_flags_were_updated;
         if (! CAN_SAVE_VECTOR_REGISTERS()) {
             SHA3_BLOCK = BlockSha3;
             SHA3_BLOCK_N = NULL;
         }
         else
+#else
+        if ((! cpuid_flags_were_updated) && (SHA3_BLOCK != NULL)) {
+        }
+        else
 #endif
-        if (IS_INTEL_BMI1(cpuid_flags) && IS_INTEL_BMI2(cpuid_flags)) {
+        if (IS_INTEL_AVX2(cpuid_flags)) {
+            SHA3_BLOCK = sha3_block_avx2;
+            SHA3_BLOCK_N = sha3_block_n_avx2;
+        }
+        else if (IS_INTEL_BMI1(cpuid_flags) && IS_INTEL_BMI2(cpuid_flags)) {
             SHA3_BLOCK = sha3_block_bmi2;
             SHA3_BLOCK_N = sha3_block_n_bmi2;
-        }
-        else if (IS_INTEL_AVX2(cpuid_flags)) {
-            SHA3_BLOCK = sha3_block_avx2;
-            SHA3_BLOCK_N = NULL;
         }
         else {
             SHA3_BLOCK = BlockSha3;
@@ -638,11 +639,13 @@ static int InitSha3(wc_Sha3* sha3)
         }
     }
 #define SHA3_FUNC_PTR
-#endif
+#endif /* USE_INTEL_SPEEDUP */
 #if defined(__aarch64__) && defined(WOLFSSL_ARMASM)
-    if (!cpuid_flags_set) {
-        cpuid_flags = cpuid_get_flags();
-        cpuid_flags_set = 1;
+    {
+        int cpuid_flags_were_updated = cpuid_get_flags_ex(&cpuid_flags);
+        if ((! cpuid_flags_were_updated) && (SHA3_BLOCK != NULL)) {
+        }
+        else
     #ifdef WOLFSSL_ARMASM_CRYPTO_SHA3
         if (IS_AARCH64_SHA3(cpuid_flags)) {
             SHA3_BLOCK = BlockSha3_crypto;

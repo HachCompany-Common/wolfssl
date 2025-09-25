@@ -3368,7 +3368,7 @@ int wolfSSL_read(WOLFSSL* ssl, void* data, int sz)
 }
 
 
-/* returns 0 on failure and on no read */
+/* returns 0 on failure and 1 on read */
 int wolfSSL_read_ex(WOLFSSL* ssl, void* data, size_t sz, size_t* rd)
 {
     int ret;
@@ -3388,8 +3388,7 @@ int wolfSSL_read_ex(WOLFSSL* ssl, void* data, size_t sz, size_t* rd)
         *rd = (size_t)ret;
     }
 
-    if (ret <= 0) ret = 0;
-    return ret;
+    return ret > 0 ? 1 : 0;
 }
 
 #ifdef WOLFSSL_MULTICAST
@@ -4292,7 +4291,15 @@ int wolfSSL_CTX_UseSessionTicket(WOLFSSL_CTX* ctx)
 
 int wolfSSL_get_SessionTicket(WOLFSSL* ssl, byte* buf, word32* bufSz)
 {
-    if (ssl == NULL || buf == NULL || bufSz == NULL || *bufSz == 0)
+    if (ssl == NULL || bufSz == NULL)
+        return BAD_FUNC_ARG;
+
+    if (*bufSz == 0 && buf == NULL) {
+        *bufSz = ssl->session->ticketLen;
+        return LENGTH_ONLY_E;
+    }
+
+    if (buf == NULL)
         return BAD_FUNC_ARG;
 
     if (ssl->session->ticketLen <= *bufSz) {
@@ -5869,7 +5876,7 @@ int AddCA(WOLFSSL_CERT_MANAGER* cm, DerBuffer** pDer, int type, int verify)
 #endif
     DerBuffer*   der = *pDer;
 
-    WOLFSSL_MSG("Adding a CA");
+    WOLFSSL_MSG_CERT_LOG("Adding a CA");
 
     if (cm == NULL) {
         FreeDer(pDer);
@@ -5893,8 +5900,34 @@ int AddCA(WOLFSSL_CERT_MANAGER* cm, DerBuffer** pDer, int type, int verify)
     }
 #endif
 
+    WOLFSSL_MSG_CERT("\tParsing new CA");
     ret = ParseCert(cert, CA_TYPE, verify, cm);
+
     WOLFSSL_MSG("\tParsed new CA");
+#ifdef WOLFSSL_DEBUG_CERTS
+    #ifdef WOLFSSL_SMALL_STACK
+    if (cert == NULL) {
+        WOLFSSL_MSG_CERT(WOLFSSL_MSG_CERT_INDENT "Failed; cert is NULL");
+    }
+    else
+    #endif
+    {
+        const char*  err_msg;
+        if (ret == 0) {
+            WOLFSSL_MSG_CERT_EX(WOLFSSL_MSG_CERT_INDENT "issuer:  '%s'",
+                cert->issuer);
+            WOLFSSL_MSG_CERT_EX(WOLFSSL_MSG_CERT_INDENT "subject: '%s'",
+                cert->subject);
+        }
+        else {
+            WOLFSSL_MSG_CERT(
+                WOLFSSL_MSG_CERT_INDENT "Failed during parse of new CA");
+            err_msg = wc_GetErrorString(ret);
+            WOLFSSL_MSG_CERT_EX(WOLFSSL_MSG_CERT_INDENT "error ret: %d; %s",
+                ret, err_msg);
+        }
+    }
+#endif /* WOLFSSL_DEBUG_CERTS */
 
 #ifndef NO_SKID
     subjectHash = cert->extSubjKeyId;
@@ -5903,7 +5936,7 @@ int AddCA(WOLFSSL_CERT_MANAGER* cm, DerBuffer** pDer, int type, int verify)
 #endif
 
     /* check CA key size */
-    if (verify) {
+    if (verify && (ret == 0 )) {
         switch (cert->keyOID) {
         #ifndef NO_RSA
             #ifdef WC_RSA_PSS
@@ -5913,7 +5946,10 @@ int AddCA(WOLFSSL_CERT_MANAGER* cm, DerBuffer** pDer, int type, int verify)
                 if (cm->minRsaKeySz < 0 ||
                                    cert->pubKeySize < (word16)cm->minRsaKeySz) {
                     ret = RSA_KEY_SIZE_E;
-                    WOLFSSL_MSG("\tCA RSA key size error");
+                    WOLFSSL_MSG_CERT_LOG("\tCA RSA key size error");
+                    WOLFSSL_MSG_CERT_EX("\tCA RSA pubKeySize = %d; "
+                                                "minRsaKeySz = %d",
+                                   cert->pubKeySize, cm->minRsaKeySz);
                 }
                 break;
         #endif /* !NO_RSA */
@@ -5922,7 +5958,10 @@ int AddCA(WOLFSSL_CERT_MANAGER* cm, DerBuffer** pDer, int type, int verify)
                 if (cm->minEccKeySz < 0 ||
                                    cert->pubKeySize < (word16)cm->minEccKeySz) {
                     ret = ECC_KEY_SIZE_E;
-                    WOLFSSL_MSG("\tCA ECC key size error");
+                    WOLFSSL_MSG_CERT_LOG("\tCA ECC key size error");
+                    WOLFSSL_MSG_CERT_EX("\tCA ECC pubKeySize = %d; "
+                                                 "minEccKeySz = %d",
+                                   cert->pubKeySize, cm->minEccKeySz);
                 }
                 break;
             #endif /* HAVE_ECC */
@@ -6041,11 +6080,13 @@ int AddCA(WOLFSSL_CERT_MANAGER* cm, DerBuffer** pDer, int type, int verify)
     if (ret == 0 && signer != NULL) {
         ret = FillSigner(signer, cert, type, der);
 
-    #ifndef NO_SKID
-        row = HashSigner(signer->subjectKeyIdHash);
-    #else
-        row = HashSigner(signer->subjectNameHash);
-    #endif
+        if (ret == 0){
+        #ifndef NO_SKID
+            row = HashSigner(signer->subjectKeyIdHash);
+        #else
+            row = HashSigner(signer->subjectNameHash);
+        #endif
+        }
 
     #if defined(WOLFSSL_RENESAS_TSIP_TLS) || defined(WOLFSSL_RENESAS_FSPSM_TLS)
         /* Verify CA by TSIP so that generated tsip key is going to          */
@@ -6100,6 +6141,49 @@ int AddCA(WOLFSSL_CERT_MANAGER* cm, DerBuffer** pDer, int type, int verify)
     return ret == 0 ? WOLFSSL_SUCCESS : ret;
 }
 
+/* Sets the CA with the passed in subject hash
+   to the provided type. */
+int SetCAType(WOLFSSL_CERT_MANAGER* cm, byte* hash, int type)
+{
+    Signer* current;
+    int     ret = WC_NO_ERR_TRACE(WOLFSSL_FAILURE);
+    word32  row;
+
+    WOLFSSL_MSG_EX("Setting CA to type %d", type);
+
+    if (cm == NULL || hash == NULL ||
+        type < WOLFSSL_USER_CA || type > WOLFSSL_USER_INTER) {
+        return ret;
+    }
+
+    row = HashSigner(hash);
+
+    if (wc_LockMutex(&cm->caLock) != 0) {
+        return ret;
+    }
+    current = cm->caTable[row];
+    while (current) {
+        byte* subjectHash;
+
+    #ifndef NO_SKID
+        subjectHash = current->subjectKeyIdHash;
+    #else
+        subjectHash = current->subjectNameHash;
+    #endif
+
+        if (XMEMCMP(hash, subjectHash, SIGNER_DIGEST_SIZE) == 0) {
+            current->type = (byte)type;
+            ret = WOLFSSL_SUCCESS;
+            break;
+        }
+        current = current->next;
+    }
+    wc_UnLockMutex(&cm->caLock);
+
+    WOLFSSL_LEAVE("SetCAType", ret);
+
+    return ret;
+}
 #endif /* !NO_CERTS */
 
 
@@ -6238,7 +6322,7 @@ int wolfSSL_Init(void)
 #endif
 
     #ifdef WC_RNG_SEED_CB
-        wc_SetSeed_Cb(wc_GenerateSeed);
+        wc_SetSeed_Cb(WC_GENERATE_SEED_DEFAULT);
     #endif
 
 #ifdef OPENSSL_EXTRA
@@ -8722,148 +8806,75 @@ static int isArrayUnique(const char* buf, size_t len)
     return 1;
 }
 
-/* Set user preference for the client_cert_type exetnsion.
+/* Set user preference for the {client,server}_cert_type extension.
  * Takes byte array containing cert types the caller can provide to its peer.
  * Cert types are in preferred order in the array.
  */
+static int set_cert_type(RpkConfig* cfg,
+                         int client, const char* buf, int bufLen)
+{
+    int i;
+    byte* certTypeCnt;
+    byte* certTypes;
+
+    if (cfg == NULL || bufLen > (client ? MAX_CLIENT_CERT_TYPE_CNT :
+                                          MAX_SERVER_CERT_TYPE_CNT)) {
+        return BAD_FUNC_ARG;
+    }
+
+    if (client) {
+        certTypeCnt = &cfg->preferred_ClientCertTypeCnt;
+        certTypes   =  cfg->preferred_ClientCertTypes;
+    }
+    else {
+        certTypeCnt = &cfg->preferred_ServerCertTypeCnt;
+        certTypes   =  cfg->preferred_ServerCertTypes;
+    }
+    /* if buf is set to NULL or bufLen is zero, it defaults the setting*/
+    if (buf == NULL || bufLen == 0) {
+        *certTypeCnt = 1;
+        for (i = 0; i < 2; i++)
+            certTypes[i] = WOLFSSL_CERT_TYPE_X509;
+        return WOLFSSL_SUCCESS;
+    }
+
+    if (!isArrayUnique(buf, (size_t)bufLen))
+        return BAD_FUNC_ARG;
+
+    for (i = 0; i < bufLen; i++) {
+        if (buf[i] != WOLFSSL_CERT_TYPE_RPK && buf[i] != WOLFSSL_CERT_TYPE_X509)
+            return BAD_FUNC_ARG;
+        certTypes[i] = (byte)buf[i];
+    }
+    *certTypeCnt = bufLen;
+
+    return WOLFSSL_SUCCESS;
+}
+int wolfSSL_set_client_cert_type(WOLFSSL* ssl, const char* buf, int buflen)
+{
+    if (ssl == NULL)
+        return BAD_FUNC_ARG;
+    return set_cert_type(&ssl->options.rpkConfig, 1, buf, buflen);
+}
+int wolfSSL_set_server_cert_type(WOLFSSL* ssl, const char* buf, int buflen)
+{
+    if (ssl == NULL)
+        return BAD_FUNC_ARG;
+    return set_cert_type(&ssl->options.rpkConfig, 0, buf, buflen);
+}
 int wolfSSL_CTX_set_client_cert_type(WOLFSSL_CTX* ctx,
-                                          const char* buf, int bufLen)
+                                     const char* buf, int buflen)
 {
-    int i;
-
-    if (ctx == NULL || bufLen > MAX_CLIENT_CERT_TYPE_CNT) {
+    if (ctx == NULL)
         return BAD_FUNC_ARG;
-    }
-
-    /* if buf is set to NULL or bufLen is set to zero, it defaults the setting*/
-    if (buf == NULL || bufLen == 0) {
-        ctx->rpkConfig.preferred_ClientCertTypeCnt = 1;
-        ctx->rpkConfig.preferred_ClientCertTypes[0]= WOLFSSL_CERT_TYPE_X509;
-        ctx->rpkConfig.preferred_ClientCertTypes[1]= WOLFSSL_CERT_TYPE_X509;
-        return WOLFSSL_SUCCESS;
-    }
-
-    if (!isArrayUnique(buf, (size_t)bufLen))
-        return BAD_FUNC_ARG;
-
-    for (i = 0; i < bufLen; i++){
-        if (buf[i] != WOLFSSL_CERT_TYPE_RPK && buf[i] != WOLFSSL_CERT_TYPE_X509)
-            return BAD_FUNC_ARG;
-
-        ctx->rpkConfig.preferred_ClientCertTypes[i] = (byte)buf[i];
-    }
-    ctx->rpkConfig.preferred_ClientCertTypeCnt = bufLen;
-
-    return WOLFSSL_SUCCESS;
+    return set_cert_type(&ctx->rpkConfig, 1, buf, buflen);
 }
-
-/* Set user preference for the server_cert_type exetnsion.
- * Takes byte array containing cert types the caller can provide to its peer.
- * Cert types are in preferred order in the array.
- */
 int wolfSSL_CTX_set_server_cert_type(WOLFSSL_CTX* ctx,
-                                                const char* buf, int bufLen)
+                                     const char* buf, int buflen)
 {
-    int i;
-
-    if (ctx == NULL || bufLen > MAX_SERVER_CERT_TYPE_CNT) {
+    if (ctx == NULL)
         return BAD_FUNC_ARG;
-    }
-
-    /* if buf is set to NULL or bufLen is set to zero, it defaults the setting*/
-    if (buf == NULL || bufLen == 0) {
-        ctx->rpkConfig.preferred_ServerCertTypeCnt = 1;
-        ctx->rpkConfig.preferred_ServerCertTypes[0]= WOLFSSL_CERT_TYPE_X509;
-        ctx->rpkConfig.preferred_ServerCertTypes[1]= WOLFSSL_CERT_TYPE_X509;
-        return WOLFSSL_SUCCESS;
-    }
-
-    if (!isArrayUnique(buf, (size_t)bufLen))
-        return BAD_FUNC_ARG;
-
-    for (i = 0; i < bufLen; i++){
-        if (buf[i] != WOLFSSL_CERT_TYPE_RPK && buf[i] != WOLFSSL_CERT_TYPE_X509)
-            return BAD_FUNC_ARG;
-
-        ctx->rpkConfig.preferred_ServerCertTypes[i] = (byte)buf[i];
-    }
-    ctx->rpkConfig.preferred_ServerCertTypeCnt = bufLen;
-
-    return WOLFSSL_SUCCESS;
-}
-
-/* Set user preference for the client_cert_type exetnsion.
- * Takes byte array containing cert types the caller can provide to its peer.
- * Cert types are in preferred order in the array.
- */
-int wolfSSL_set_client_cert_type(WOLFSSL* ssl,
-                                          const char* buf, int bufLen)
-{
-    int i;
-
-    if (ssl == NULL || bufLen > MAX_CLIENT_CERT_TYPE_CNT) {
-        return BAD_FUNC_ARG;
-    }
-
-    /* if buf is set to NULL or bufLen is set to zero, it defaults the setting*/
-    if (buf == NULL || bufLen == 0) {
-        ssl->options.rpkConfig.preferred_ClientCertTypeCnt = 1;
-        ssl->options.rpkConfig.preferred_ClientCertTypes[0]
-                                                    = WOLFSSL_CERT_TYPE_X509;
-        ssl->options.rpkConfig.preferred_ClientCertTypes[1]
-                                                    = WOLFSSL_CERT_TYPE_X509;
-        return WOLFSSL_SUCCESS;
-    }
-
-    if (!isArrayUnique(buf, (size_t)bufLen))
-        return BAD_FUNC_ARG;
-
-    for (i = 0; i < bufLen; i++){
-        if (buf[i] != WOLFSSL_CERT_TYPE_RPK && buf[i] != WOLFSSL_CERT_TYPE_X509)
-            return BAD_FUNC_ARG;
-
-        ssl->options.rpkConfig.preferred_ClientCertTypes[i] = (byte)buf[i];
-    }
-    ssl->options.rpkConfig.preferred_ClientCertTypeCnt = bufLen;
-
-    return WOLFSSL_SUCCESS;
-}
-
-/* Set user preference for the server_cert_type exetnsion.
- * Takes byte array containing cert types the caller can provide to its peer.
- * Cert types are in preferred order in the array.
- */
-int wolfSSL_set_server_cert_type(WOLFSSL* ssl,
-                                          const char* buf, int bufLen)
-{
-    int i;
-
-    if (ssl == NULL || bufLen > MAX_SERVER_CERT_TYPE_CNT) {
-        return BAD_FUNC_ARG;
-    }
-
-    /* if buf is set to NULL or bufLen is set to zero, it defaults the setting*/
-    if (buf == NULL || bufLen == 0) {
-        ssl->options.rpkConfig.preferred_ServerCertTypeCnt = 1;
-        ssl->options.rpkConfig.preferred_ServerCertTypes[0]
-                                                    = WOLFSSL_CERT_TYPE_X509;
-        ssl->options.rpkConfig.preferred_ServerCertTypes[1]
-                                                    = WOLFSSL_CERT_TYPE_X509;
-        return WOLFSSL_SUCCESS;
-    }
-
-    if (!isArrayUnique(buf, (size_t)bufLen))
-        return BAD_FUNC_ARG;
-
-    for (i = 0; i < bufLen; i++){
-        if (buf[i] != WOLFSSL_CERT_TYPE_RPK && buf[i] != WOLFSSL_CERT_TYPE_X509)
-            return BAD_FUNC_ARG;
-
-        ssl->options.rpkConfig.preferred_ServerCertTypes[i] = (byte)buf[i];
-    }
-    ssl->options.rpkConfig.preferred_ServerCertTypeCnt = bufLen;
-
-    return WOLFSSL_SUCCESS;
+    return set_cert_type(&ctx->rpkConfig, 0, buf, buflen);
 }
 
 /* get negotiated certificate type value and return it to the second parameter.
@@ -9025,7 +9036,7 @@ static SetVerifyOptions ModeToVerifyOptions(int mode)
 }
 
 WOLFSSL_ABI
-void wolfSSL_CTX_set_verify(WOLFSSL_CTX* ctx, int mode, VerifyCallback vc)
+void wolfSSL_CTX_set_verify(WOLFSSL_CTX* ctx, int mode, VerifyCallback verify_callback)
 {
     SetVerifyOptions opts;
 
@@ -9043,7 +9054,7 @@ void wolfSSL_CTX_set_verify(WOLFSSL_CTX* ctx, int mode, VerifyCallback vc)
     ctx->verifyPostHandshake = opts.verifyPostHandshake;
 #endif
 
-    ctx->verifyCallback = vc;
+    ctx->verifyCallback = verify_callback;
 }
 
 #ifdef OPENSSL_ALL
@@ -9060,7 +9071,7 @@ void wolfSSL_CTX_set_cert_verify_callback(WOLFSSL_CTX* ctx,
 #endif
 
 
-void wolfSSL_set_verify(WOLFSSL* ssl, int mode, VerifyCallback vc)
+void wolfSSL_set_verify(WOLFSSL* ssl, int mode, VerifyCallback verify_callback)
 {
     SetVerifyOptions opts;
 
@@ -9078,7 +9089,7 @@ void wolfSSL_set_verify(WOLFSSL* ssl, int mode, VerifyCallback vc)
     ssl->options.verifyPostHandshake = opts.verifyPostHandshake;
 #endif
 
-    ssl->verifyCallback = vc;
+    ssl->verifyCallback = verify_callback;
 }
 
 void wolfSSL_set_verify_result(WOLFSSL *ssl, long v)
@@ -12329,6 +12340,7 @@ int wolfSSL_set_compression(WOLFSSL* ssl)
             *sigAlgo = SM2k;
             break;
         case invalid_sa_algo:
+        case any_sa_algo:
         default:
             *hashAlgo = WC_HASH_TYPE_NONE;
             *sigAlgo = 0;
@@ -16124,6 +16136,9 @@ static WC_INLINE const char* wolfssl_kea_to_string(int kea)
             keaStr = "ECDH";
             break;
 #endif
+        case any_kea:
+            keaStr = "any";
+            break;
         default:
             keaStr = "unknown";
             break;
@@ -16175,6 +16190,9 @@ static WC_INLINE const char* wolfssl_sigalg_to_string(int sig_algo)
             authStr = "Ed448";
             break;
 #endif
+        case any_sa_algo:
+            authStr = "any";
+            break;
         default:
             authStr = "unknown";
             break;
@@ -16205,18 +16223,18 @@ static WC_INLINE const char* wolfssl_cipher_to_string(int cipher, int key_size)
 #endif
 #ifndef NO_AES
         case wolfssl_aes:
-            if (key_size == 128)
+            if (key_size == AES_128_KEY_SIZE)
                 encStr = "AES(128)";
-            else if (key_size == 256)
+            else if (key_size == AES_256_KEY_SIZE)
                 encStr = "AES(256)";
             else
                 encStr = "AES(?)";
             break;
     #ifdef HAVE_AESGCM
         case wolfssl_aes_gcm:
-            if (key_size == 128)
+            if (key_size == AES_128_KEY_SIZE)
                 encStr = "AESGCM(128)";
-            else if (key_size == 256)
+            else if (key_size == AES_256_KEY_SIZE)
                 encStr = "AESGCM(256)";
             else
                 encStr = "AESGCM(?)";
@@ -16224,9 +16242,9 @@ static WC_INLINE const char* wolfssl_cipher_to_string(int cipher, int key_size)
     #endif
     #ifdef HAVE_AESCCM
         case wolfssl_aes_ccm:
-            if (key_size == 128)
+            if (key_size == AES_128_KEY_SIZE)
                 encStr = "AESCCM(128)";
-            else if (key_size == 256)
+            else if (key_size == AES_256_KEY_SIZE)
                 encStr = "AESCCM(256)";
             else
                 encStr = "AESCCM(?)";
@@ -16240,11 +16258,11 @@ static WC_INLINE const char* wolfssl_cipher_to_string(int cipher, int key_size)
 #endif
 #ifdef HAVE_ARIA
         case wolfssl_aria_gcm:
-            if (key_size == 128)
+            if (key_size == ARIA_128_KEY_SIZE)
                 encStr = "Aria(128)";
-            else if (key_size == 192)
+            else if (key_size == ARIA_192_KEY_SIZE)
                 encStr = "Aria(192)";
-            else if (key_size == 256)
+            else if (key_size == ARIA_256_KEY_SIZE)
                 encStr = "Aria(256)";
             else
                 encStr = "Aria(?)";
@@ -16252,9 +16270,9 @@ static WC_INLINE const char* wolfssl_cipher_to_string(int cipher, int key_size)
 #endif
 #ifdef HAVE_CAMELLIA
         case wolfssl_camellia:
-            if (key_size == 128)
+            if (key_size == CAMELLIA_128_KEY_SIZE)
                 encStr = "Camellia(128)";
-            else if (key_size == 256)
+            else if (key_size == CAMELLIA_256_KEY_SIZE)
                 encStr = "Camellia(256)";
             else
                 encStr = "Camellia(?)";
@@ -16341,7 +16359,10 @@ char* wolfSSL_CIPHER_description(const WOLFSSL_CIPHER* cipher, char* in,
     authStr = wolfssl_sigalg_to_string(cipher->ssl->specs.sig_algo);
     encStr = wolfssl_cipher_to_string(cipher->ssl->specs.bulk_cipher_algorithm,
                                       cipher->ssl->specs.key_size);
-    macStr = wolfssl_mac_to_string(cipher->ssl->specs.mac_algorithm);
+    if (cipher->ssl->specs.cipher_type == aead)
+        macStr = "AEAD";
+    else
+        macStr = wolfssl_mac_to_string(cipher->ssl->specs.mac_algorithm);
 
     /* Build up the string by copying onto the end. */
     XSTRNCPY(in, wolfSSL_CIPHER_get_name(cipher), (size_t)len);
@@ -19221,6 +19242,7 @@ static int SaToNid(byte sa, int* nid)
             *nid = WC_NID_sm2;
             break;
         case invalid_sa_algo:
+        case any_sa_algo:
         default:
             ret = WOLFSSL_FAILURE;
             break;

@@ -2098,6 +2098,9 @@ WOLFSSL_LOCAL int DecodePolicyOID(char *out, word32 outSz, const byte *in,
                                   word32 inSz);
 WOLFSSL_LOCAL int EncodePolicyOID(byte *out, word32 *outSz,
                                   const char *in, void* heap);
+WOLFSSL_LOCAL int DecodeExtensionType(const byte* input, word32 length,
+                                      word32 oid, byte critical,
+                                      DecodedCert* cert, int *isUnknownExt);
 WOLFSSL_LOCAL int CheckCertSignaturePubKey(const byte* cert, word32 certSz,
         void* heap, const byte* pubKey, word32 pubKeySz, int pubKeyOID);
 #if defined(OPENSSL_EXTRA) || defined(WOLFSSL_SMALL_CERT_VERIFY)
@@ -2135,6 +2138,26 @@ WOLFSSL_LOCAL int DecodeToKey(DecodedCert* cert, int verify);
 #ifdef WOLFSSL_ASN_TEMPLATE
 WOLFSSL_LOCAL int DecodeCert(DecodedCert* cert, int verify, int* criticalExt);
 #endif
+
+WOLFSSL_LOCAL int DecodeBasicCaConstraint(const byte* input, int sz,
+                           byte *isCa, word16 *pathLength, byte *pathLengthSet);
+
+WOLFSSL_LOCAL int DecodeSubjKeyId(const byte* input, word32 sz,
+                            const byte **extSubjKeyId, word32 *extSubjKeyIdSz);
+
+WOLFSSL_LOCAL int DecodeAuthKeyId(const byte* input, word32 sz,
+            const byte **extAuthKeyId, word32 *extAuthKeyIdSz,
+            const byte **extAuthKeyIdIssuer, word32 *extAuthKeyIdIssuerSz,
+            const byte **extAuthKeyIdIssuerSN, word32 *extAuthKeyIdIssuerSNSz);
+
+WOLFSSL_LOCAL int DecodeKeyUsage(const byte* input, word32 sz,
+                                 word16 *extKeyUsage);
+
+WOLFSSL_LOCAL int DecodeExtKeyUsage(const byte* input, word32 sz,
+        const byte **extExtKeyUsageSrc, word32 *extExtKeyUsageSz,
+        word32 *extExtKeyUsageCount, byte *extExtKeyUsage,
+        byte *extExtKeyUsageSsh);
+
 WOLFSSL_LOCAL int TryDecodeRPKToKey(DecodedCert* cert);
 WOLFSSL_LOCAL int wc_GetPubX509(DecodedCert* cert, int verify, int* badDate);
 
@@ -2206,8 +2229,8 @@ WOLFSSL_ASN_API int SetName(byte* output, word32 outputSz, CertName* name);
 WOLFSSL_LOCAL const char* GetOneCertName(CertName* name, int idx);
 WOLFSSL_LOCAL byte GetCertNameId(int idx);
 #endif
-WOLFSSL_LOCAL int GetShortInt(const byte* input, word32* inOutIdx, int* number,
-                              word32 maxIdx);
+WOLFSSL_TEST_VIS int GetShortInt(const byte* input, word32* inOutIdx,
+        int* number, word32 maxIdx);
 WOLFSSL_TEST_VIS int SetShortInt(byte* output, word32* inOutIdx, word32 number,
                               word32 maxIdx);
 
@@ -2740,7 +2763,7 @@ WOLFSSL_LOCAL int DecodeAsymKey(const byte* input, word32* inOutIdx,
 #endif
 
 #ifdef WC_ENABLE_ASYM_KEY_EXPORT
-WOLFSSL_LOCAL int SetAsymKeyDer(const byte* privKey, word32 privKeyLen,
+WOLFSSL_TEST_VIS int SetAsymKeyDer(const byte* privKey, word32 privKeyLen,
     const byte* pubKey, word32 pubKeyLen, byte* output, word32 outLen,
     int keyType);
 #endif

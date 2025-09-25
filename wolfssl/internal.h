@@ -1713,7 +1713,8 @@ enum Misc {
     TLS_EXPORT_PRO           = 167,/* wolfSSL protocol for serialized TLS */
     DTLS_EXPORT_OPT_SZ       = 62, /* amount of bytes used from Options */
     DTLS_EXPORT_OPT_SZ_4     = 61, /* amount of bytes used from Options */
-    TLS_EXPORT_OPT_SZ        = 65, /* amount of bytes used from Options */
+    TLS_EXPORT_OPT_SZ        = 66, /* amount of bytes used from Options */
+    TLS_EXPORT_OPT_SZ_4      = 65, /* amount of bytes used from Options */
     DTLS_EXPORT_OPT_SZ_3     = 60, /* amount of bytes used from Options */
     DTLS_EXPORT_KEY_SZ       = 325 + (DTLS_SEQ_SZ * 2),
                                    /* max amount of bytes used from Keys */
@@ -2292,7 +2293,7 @@ WOLFSSL_LOCAL void CopyDecodedName(WOLFSSL_X509_NAME* name, DecodedCert* dCert, 
 #endif
 WOLFSSL_LOCAL int  SetupTicket(WOLFSSL* ssl);
 WOLFSSL_LOCAL int  CreateTicket(WOLFSSL* ssl);
-WOLFSSL_LOCAL int  HashRaw(WOLFSSL* ssl, const byte* output, int sz);
+WOLFSSL_LOCAL int  HashRaw(WOLFSSL* ssl, const byte* data, int sz);
 WOLFSSL_LOCAL int  HashOutput(WOLFSSL* ssl, const byte* output, int sz,
                               int ivSz);
 WOLFSSL_LOCAL int  HashInput(WOLFSSL* ssl, const byte* input, int sz);
@@ -2779,7 +2780,7 @@ typedef struct ProcPeerCertArgs {
 #endif
 } ProcPeerCertArgs;
 WOLFSSL_LOCAL int DoVerifyCallback(WOLFSSL_CERT_MANAGER* cm, WOLFSSL* ssl,
-        int ret, ProcPeerCertArgs* args);
+        int cert_err, ProcPeerCertArgs* args);
 WOLFSSL_LOCAL void DoCrlCallback(WOLFSSL_CERT_MANAGER* cm, WOLFSSL* ssl,
         ProcPeerCertArgs* args, int* outRet);
 
@@ -3631,6 +3632,10 @@ typedef struct KeyShareEntry {
     byte*                 privKey;   /* Private key                       */
     word32                privKeyLen;/* Private key length - PQC only     */
 #endif
+#if defined(HAVE_SESSION_TICKET) || !defined(NO_PSK)
+    word16                session;   /* NamedGroup that was in session    */
+    word16                derived;   /* preMaster has been derived        */
+#endif
 #ifdef WOLFSSL_ASYNC_CRYPT
     int                   lastRet;
 #endif
@@ -4276,6 +4281,7 @@ int ProcessOldClientHello(WOLFSSL* ssl, const byte* input, word32* inOutIdx,
     WOLFSSL_LOCAL int AddSigner(WOLFSSL_CERT_MANAGER* cm, Signer *s);
     WOLFSSL_LOCAL
     int AddCA(WOLFSSL_CERT_MANAGER* cm, DerBuffer** pDer, int type, int verify);
+    WOLFSSL_LOCAL int SetCAType(WOLFSSL_CERT_MANAGER* cm, byte* hash, int type);
     WOLFSSL_LOCAL
     int AlreadySigner(WOLFSSL_CERT_MANAGER* cm, byte* hash);
 #ifdef WOLFSSL_TRUST_PEER_CERT
@@ -4324,7 +4330,8 @@ enum KeyExchangeAlgorithm {
     dhe_psk_kea,
     ecdhe_psk_kea,
     ecc_diffie_hellman_kea,
-    ecc_static_diffie_hellman_kea       /* for verify suite only */
+    ecc_static_diffie_hellman_kea,      /* for verify suite only */
+    any_kea
 };
 
 /* Used with InitSuitesHashSigAlgo */
@@ -4354,6 +4361,7 @@ enum SignatureAlgorithm {
     dilithium_level3_sa_algo     = 15,
     dilithium_level5_sa_algo     = 16,
     sm2_sa_algo                  = 17,
+    any_sa_algo                  = 18,
     invalid_sa_algo              = 255
 };
 
@@ -6521,7 +6529,7 @@ static const byte kTlsServerStr[SIZEOF_SENDER+1] = { 0x53, 0x52, 0x56, 0x52, 0x0
 static const byte kTlsClientFinStr[FINISHED_LABEL_SZ + 1] = "client finished";
 static const byte kTlsServerFinStr[FINISHED_LABEL_SZ + 1] = "server finished";
 
-#if defined(OPENSSL_EXTRA) || defined(WOLFSSL_WPAS_SMALL)
+#if defined(OPENSSL_EXTRA) || defined(WOLFSSL_WPAS_SMALL) || defined(HAVE_CURL)
 typedef struct {
     int name_len;
     const char *name;
@@ -6531,7 +6539,7 @@ typedef struct {
 extern const WOLF_EC_NIST_NAME kNistCurves[];
 WOLFSSL_LOCAL int set_curves_list(WOLFSSL* ssl, WOLFSSL_CTX *ctx,
         const char* names, byte curves_only);
-#endif /* OPENSSL_EXTRA || WOLFSSL_WPAS_SMALL */
+#endif /* OPENSSL_EXTRA || WOLFSSL_WPAS_SMALL || HAVE_CURL */
 
 /* internal functions */
 WOLFSSL_LOCAL int SendChangeCipher(WOLFSSL* ssl);
@@ -6719,7 +6727,7 @@ WOLFSSL_LOCAL WC_RNG* WOLFSSL_RSA_GetRNG(WOLFSSL_RSA *rsa, WC_RNG **tmpRNG,
         WOLFSSL_LOCAL Signer* GetCAByKeyHash(void* vp, const byte* keyHash);
     #endif
     #if !defined(NO_SKID) && !defined(GetCAByName)
-        WOLFSSL_LOCAL Signer* GetCAByName(void* cm, byte* hash);
+        WOLFSSL_LOCAL Signer* GetCAByName(void* vp, byte* hash);
     #endif
 #endif /* !NO_CERTS */
 WOLFSSL_LOCAL int  BuildTlsHandshakeHash(WOLFSSL* ssl, byte* hash,
