@@ -627,7 +627,8 @@ static int Pkcs11Token_Init(Pkcs11Token* token, Pkcs11Dev* dev, int slotId,
         token->userPinLogin = 0;
     }
 
-    XFREE(slot, dev->heap, DYNAMIC_TYPE_TMP_BUFFER);
+    if (slot != NULL)
+        XFREE(slot, dev->heap, DYNAMIC_TYPE_TMP_BUFFER);
 
     return ret;
 }
