@@ -2784,8 +2784,8 @@ static int Pkcs11ECDH(Pkcs11Session* session, wc_CryptoInfo* info)
                                                           info->pk.ecdh.outlen);
     }
 
-    if (sessionKey)
-        session->func->C_DestroyObject(session->handle, privateKey);
+    session->func->C_DestroyObject(session->handle, privateKey);
+    session->func->C_DestroyObject(session->handle, secret);
 
     if (point != NULL)
         XFREE(point, info->pk.ecdh.public_key->heap, DYNAMIC_TYPE_ECC_BUFFER);
